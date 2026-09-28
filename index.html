@@ -349,6 +349,7 @@
         let tasksData = []; 
         let unsubscribeTasks = null;
         let isCompressing = false;
+        let useCloud = false;
 
         /* PENGATURAN FIREBASE (Sesuai Aturan Sistem) */
         try {
@@ -360,6 +361,7 @@
         }
 
         if (firebaseConfig) {
+            useCloud = true;
             app = initializeApp(firebaseConfig);
             db = getFirestore(app);
             auth = getAuth(app);
@@ -388,20 +390,22 @@
 
             initAuth();
         } else {
-            document.getElementById('initial-loader').innerHTML = `
-                <div class="text-red-500 text-center bg-red-50 p-6 rounded-2xl mx-4 border border-red-100">
-                    <div class="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mx-auto mb-3">
-                        <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
-                    </div>
-                    <p class="font-bold text-sm">Koneksi Database Terputus</p>
-                    <p class="text-xs text-red-400 mt-1">Konfigurasi awan tidak ditemukan pada sistem.</p>
-                </div>
-            `;
+            console.warn("Cloud config missing. Beralih ke mode memori lokal.");
+            useCloud = false;
+            
+            // Hapus pesan eror dan tampilkan antarmuka kosong setelah jeda
+            setTimeout(() => {
+                const initialLoader = document.getElementById('initial-loader');
+                if (initialLoader) initialLoader.remove();
+                renderTasks();
+                updateStats();
+                showToast("Sistem berjalan dalam mode sesi lokal", "success");
+            }, 800);
         }
 
         /* FUNGSI SINKRONISASI DATA (Real-time) */
         function setupRealtimeListener() {
-            if (!currentUser) return;
+            if (!useCloud || !currentUser) return;
             
             // Aturan Strict: public/data/schedules
             const tasksRef = collection(db, 'artifacts', appId, 'public', 'data', 'schedules');
@@ -706,11 +710,6 @@
                 return;
             }
 
-            if (!currentUser) {
-                showToast("Koneksi awan belum siap.", "error");
-                return;
-            }
-
             // Loading state tombol
             const submitBtn = document.getElementById('submit-btn');
             const submitText = document.getElementById('submit-text');
@@ -732,29 +731,51 @@
                 priority: document.getElementById('task-priority').value,
                 pic: document.getElementById('task-pic').value.trim(),
                 image: document.getElementById('task-image-base64').value, // Base64 hasil kompres
-                updatedAt: serverTimestamp()
             };
 
-            const tasksRef = collection(db, 'artifacts', appId, 'public', 'data', 'schedules');
-
             try {
-                if (id) {
-                    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', id);
-                    await updateDoc(docRef, taskData);
-                    showToast("Jadwal diperbarui.");
+                if (useCloud) {
+                    if (!currentUser) throw new Error("Koneksi awan belum siap.");
+                    const tasksRef = collection(db, 'artifacts', appId, 'public', 'data', 'schedules');
+                    taskData.updatedAt = serverTimestamp();
+
+                    if (id) {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', id);
+                        await updateDoc(docRef, taskData);
+                        showToast("Jadwal diperbarui.");
+                    } else {
+                        taskData.createdAt = serverTimestamp();
+                        taskData.userId = currentUser.uid;
+                        await addDoc(tasksRef, taskData);
+                        showToast("Jadwal baru ditambahkan.");
+                    }
                 } else {
-                    taskData.createdAt = serverTimestamp();
-                    taskData.userId = currentUser.uid;
-                    await addDoc(tasksRef, taskData);
-                    showToast("Jadwal baru ditambahkan.");
+                    // MODE LOKAL (Tanpa Cloud)
+                    if (id) {
+                        const idx = tasksData.findIndex(t => t.id === id);
+                        if (idx !== -1) {
+                            tasksData[idx] = { ...tasksData[idx], ...taskData };
+                            showToast("Jadwal diperbarui (Sesi Lokal).");
+                        }
+                    } else {
+                        const newTask = {
+                            ...taskData,
+                            id: 'local_' + Date.now(),
+                            createdAt: { toMillis: () => Date.now() } // Mock timestamp
+                        };
+                        tasksData.unshift(newTask);
+                        showToast("Jadwal ditambahkan (Sesi Lokal).");
+                    }
+                    renderTasks();
+                    updateStats();
                 }
                 closeModal();
             } catch (error) {
                 console.error("Gagal simpan:", error);
-                if(error.code === 'resource-exhausted' || error.message.includes('too large')) {
+                if(error.code === 'resource-exhausted' || (error.message && error.message.includes('too large'))) {
                     showToast("Gagal: Memori awan penuh (Gambar terlalu besar).", "error");
                 } else {
-                    showToast("Gagal menyimpan ke awan.", "error");
+                    showToast("Terjadi kesalahan saat menyimpan.", "error");
                 }
             } finally {
                 // Kembalikan tombol ke semula
@@ -795,8 +816,6 @@
         };
 
         window.executeDelete = async (id) => {
-            if (!currentUser) return;
-            
             // Ubah tombol hapus jadi loading indicator visual saja
             const btnHapus = document.querySelector('#confirm-modal button.bg-red-500');
             if(btnHapus) {
@@ -805,9 +824,18 @@
             }
 
             try {
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', id);
-                await deleteDoc(docRef);
-                showToast("Jadwal dihapus.");
+                if (useCloud) {
+                    if (!currentUser) return;
+                    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', id);
+                    await deleteDoc(docRef);
+                    showToast("Jadwal dihapus.");
+                } else {
+                    // MODE LOKAL
+                    tasksData = tasksData.filter(t => t.id !== id);
+                    renderTasks();
+                    updateStats();
+                    showToast("Jadwal dihapus (Sesi Lokal).");
+                }
                 closeConfirmModal();
             } catch (error) {
                 console.error("Gagal hapus:", error);
